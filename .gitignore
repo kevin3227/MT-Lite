@@ -1,0 +1,126 @@
+# =====================
+# 核心构建产物
+# =====================
+# CMake生成文件
+**/CMakeCache.txt
+**/CMakeFiles/
+**/Makefile
+**/cmake_install.cmake
+**/CTestTestfile.cmake
+**/CPackConfig.cmake
+**/CPackSourceConfig.cmake
+**/.ninja_deps
+**/.ninja_log
+
+# 构建目录（推荐out-of-source构建）
+/build*/
+**/_build/
+**/x64/
+**/x86/
+**/Win32/
+**/Debug/
+**/Release/
+**/RelWithDebInfo/
+**/MinSizeRel/
+
+# =====================
+# 开发环境特定文件
+# =====================
+# IDE相关
+**/.vs/
+**/.vscode/
+**/.idea/
+**/*.suo
+**/*.njsproj
+**/*.sln
+**/*.vcxproj*
+**/*.vcproj
+**/*.user
+**/*.filters
+
+# 编辑器临时文件
+**/*~
+**/*.swp
+**/*.swo
+**/.DS_Store
+**/.directory
+**/Thumbs.db
+
+# =====================
+# 二进制和可执行文件
+# =====================
+# 编译输出
+**/*.exe
+**/*.dll
+**/*.so
+**/*.dylib
+**/*.a
+**/*.lib
+**/*.out
+**/*.app
+**/*.o
+**/*.obj
+**/*.ilk
+**/*.pdb
+**/*.ipch
+**/*.exp
+**/*.manifest
+
+# 测试覆盖率
+**/*.gcda
+**/*.gcno
+**/coverage/
+**/*.lcov
+
+# =====================
+# 依赖管理
+# =====================
+# Conan包管理
+**/conanbuildinfo.*
+**/conaninfo.txt
+**/conan_imports/
+
+# vcpkg
+**/vcpkg_installed/
+
+# 第三方依赖
+**/third_party/
+**/external/
+**/deps/
+
+# =====================
+# 文档和日志
+# =====================
+# 生成文档
+**/doc/html/
+**/doc/xml/
+**/doc/.doxygen
+
+# 日志文件
+**/*.log
+**/logs/
+
+# =====================
+# 系统特定文件
+# =====================
+# macOS
+**/.DS_Store
+**/._*
+
+# Linux
+**/*~
+**/.directory
+
+# Windows
+**/[Dd]esktop.ini
+**/[Tt]humbs.db
+
+# =====================
+# 测试相关
+# =====================
+# 测试数据
+**/test_data/
+**/*.test
+
+# 基准测试结果
+**/*.bench
