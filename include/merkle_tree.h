@@ -3,7 +3,9 @@
 #include <memory>
 #include <string>
 #include <stack>
-#include <mutex> // 添加互斥锁头文件
+#include <mutex>
+#include <shared_mutex>
+#include <unordered_map>
 
 struct MerkleNode {
     std::string hash;
@@ -33,14 +35,16 @@ public:
 
     // 性能分析接口
     size_t node_count() const { return node_counter_; }
-    size_t leaf_count() const { return leaves_.size(); } // 新增叶子计数
+    size_t leaf_count() const { return leaf_map_.size(); }
 
 private:
-    std::vector<std::shared_ptr<MerkleNode>> leaves_;
     std::shared_ptr<MerkleNode> root_;
     size_t node_counter_ = 0;
     std::stack<std::shared_ptr<MerkleNode>> merge_stack_;
-    std::mutex insert_mutex_; // 互斥锁确保线程安全
+    mutable std::shared_mutex mutex_; // C++17读写锁支持
+    
+    // 存储结构优化关键点：叶子节点哈希映射
+    std::unordered_map<std::string, std::shared_ptr<MerkleNode>> leaf_map_;
 
     static std::string hash_data(const std::string& data);
     std::shared_ptr<MerkleNode> build_parent(

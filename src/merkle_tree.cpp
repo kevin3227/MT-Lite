@@ -2,6 +2,10 @@
 #include "sha3.h"
 #include <algorithm>
 
+using LockType = std::shared_mutex;
+using ReadLock = std::shared_lock<LockType>;
+using WriteLock = std::unique_lock<LockType>;
+
 std::string MerkleTree::hash_data(const std::string& data) {
     sha3_ctx_t ctx;
     uint8_t hash[32];
@@ -41,10 +45,18 @@ void MerkleTree::process_merge_stack() {
 }
 
 void MerkleTree::insert(const std::string& data) {
-    std::lock_guard<std::mutex> lock(insert_mutex_); // 确保线程安全
-    auto leaf = std::make_shared<MerkleNode>(hash_data(data));
+    WriteLock lock(mutex_); // 写操作独占锁
+    
+    auto leaf_hash = hash_data(data);
+    
+    // 关键优化点1：快速检查重复插入
+    if (leaf_map_.find(leaf_hash) != leaf_map_.end()) return;
+    
+    auto leaf = std::make_shared<MerkleNode>(leaf_hash);
     node_counter_++;
-    leaves_.push_back(leaf);
+    
+    // 关键优化点2：更新索引映射
+    leaf_map_.emplace(leaf_hash, leaf);
     
     // 增量更新开始
     merge_stack_.push(leaf);
@@ -57,24 +69,26 @@ void MerkleTree::insert(const std::string& data) {
 }
 
 bool MerkleTree::contains(const std::string& data) const {
-    std::string target_hash = hash_data(data);
-    return std::any_of(leaves_.begin(), leaves_.end(),
-                       [&target_hash](const std::shared_ptr<MerkleNode>& leaf) {
-                           return leaf->hash == target_hash;
-                       });
+    ReadLock lock(mutex_); // 读操作共享锁
+    
+    // 关键优化点3：哈希查找O(1)复杂度
+    return leaf_map_.find(hash_data(data)) != leaf_map_.end();
 }
 
 MerkleTree::Proof MerkleTree::generate_proof(const std::string& data) const {
     Proof proof;
+    WriteLock lock(mutex_); // 证明生成需要暂时升级为写锁（保证树结构不变）
+    
     const std::string target_hash = hash_data(data);
     
-    auto leaf_iter = std::find_if(leaves_.begin(), leaves_.end(),
-        [&target_hash](const auto& node) { return node->hash == target_hash; });
-    if (leaf_iter == leaves_.end()) return proof;
+    // 关键优化点4：直接定位叶子节点
+    auto leaf_iter = leaf_map_.find(target_hash);
+    if (leaf_iter == leaf_map_.end()) return proof;
     
     proof.leaf = target_hash;
-    auto current_node = *leaf_iter;
+    auto current_node = leaf_iter->second;
     
+    // 向上遍历到根节点构建路径
     while (auto parent = current_node->parent.lock()) {
         const bool is_right_child = (parent->right && parent->right->hash == current_node->hash);
         auto sibling = is_right_child ? parent->left : parent->right;
@@ -88,6 +102,9 @@ MerkleTree::Proof MerkleTree::generate_proof(const std::string& data) const {
 }
 
 bool MerkleTree::verify_proof(const Proof& proof, const std::string& root_hash) {
+    // 静态方法，无需锁定
+    if (proof.path.empty() || proof.leaf.empty()) return false;
+    
     std::string current_hash = proof.leaf;
     
     for (const auto& [isRight, sibling_hash] : proof.path) {
