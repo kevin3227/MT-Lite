@@ -6,6 +6,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
+#include <atomic>
 
 struct MerkleNode {
     std::string hash;
@@ -41,7 +42,9 @@ private:
     std::shared_ptr<MerkleNode> root_;
     size_t node_counter_ = 0;
     std::stack<std::shared_ptr<MerkleNode>> merge_stack_;
-    mutable std::shared_mutex mutex_; // C++17读写锁支持
+    mutable std::shared_mutex index_mutex_;
+    mutable std::mutex structure_mutex_;
+    std::atomic<uint64_t> version_{0};
     
     // 存储结构优化关键点：叶子节点哈希映射
     std::unordered_map<std::string, std::shared_ptr<MerkleNode>> leaf_map_;
