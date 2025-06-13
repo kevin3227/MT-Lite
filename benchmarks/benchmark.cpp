@@ -227,6 +227,6 @@ static void BM_MemoryUsage(benchmark::State& state) {
             );
     }
 }
-BENCHMARK(BM_MemoryUsage)->Arg(1'000)->Arg(10'000)->Arg(10'000)->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_MemoryUsage)->Arg(1'000)->Arg(10'000)->Unit(benchmark::kMillisecond);
 
 BENCHMARK_MAIN();
