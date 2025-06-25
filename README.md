@@ -18,14 +18,14 @@ MT-Lite/
 ## 📌 Features
 
 - 🔥 [High Performance]
-  - Single insert: 198 ns
-  - Proof generation: 0.625 μs
-  - Proof verification: 1.18 μs
-  - 10,000 node memory overhead: 1.6MB
+  - Single insert: ~200 ns
+  - Proof generation: ~0.5 μs
+  - Proof verification: ~1 μs
+  - 10,000 node memory overhead: ~1.5MB
 
 - 🧮 [Efficient Batch Operations]
-  - 1,000 inserts/commit: 0.454 ms
-  - 10,000 inserts/commit: 11.0 ms
+  - 1,000 inserts/commit: ~0.5 ms
+  - 10,000 inserts/commit: ~10 ms
 
 - ⚛️ [Atomic Tree Operations]
   - Thread-safe inserts with versioning
