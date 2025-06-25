@@ -216,7 +216,7 @@ static void BM_MemoryUsage(benchmark::State& state) {
             );
     }
 }
-BENCHMARK(BM_MemoryUsage)->Arg(1'000)->Arg(10'000)->Arg(10'000)->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_MemoryUsage)->Arg(1'000)->Arg(10'000)->Unit(benchmark::kMillisecond);
 
 // 树结构分析
 static void BM_TreeStructureAnalysis(benchmark::State& state) {
@@ -253,7 +253,7 @@ static void BM_TreeStructureAnalysis(benchmark::State& state) {
         benchmark::DoNotOptimize(valid);
     }
 }
-BENCHMARK(BM_TreeStructureAnalysis);
+// BENCHMARK(BM_TreeStructureAnalysis);
 
 // 批量验证性能
 static void BM_BatchVerification(benchmark::State& state) {
