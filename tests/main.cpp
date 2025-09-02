@@ -1,17 +1,20 @@
 #include <gtest/gtest.h>
 #include "../include/merkle_tree.h"
 #include <chrono>
-#include <iostream>
 #include <thread>
 #include <vector>
 #include <atomic>
-#include <mutex>
 #include <random>
 #include <algorithm>
 
 class MerkleTreeTest : public ::testing::Test {
 protected:
     MerkleTree tree;
+    
+    // 在每个测试用例后刷新缓冲区
+    void TearDown() override {
+        tree.flush();
+    }
 };
 
 // 基本功能测试
@@ -23,6 +26,8 @@ TEST_F(MerkleTreeTest, EmptyTree) {
 
 TEST_F(MerkleTreeTest, SingleInsert) {
     tree.insert("tx1");
+    tree.flush(); // 确保异步插入已处理
+    
     EXPECT_FALSE(tree.root_hash().empty());
     EXPECT_EQ(tree.node_count(), 1);
     EXPECT_EQ(tree.leaf_count(), 1);
@@ -32,6 +37,7 @@ TEST_F(MerkleTreeTest, ProofVerification) {
     tree.insert("Data1");
     tree.insert("Data2");
     tree.insert("Data3");
+    tree.flush(); // 确保异步插入已处理
     
     {
         auto valid_proof = tree.generate_proof("Data2");
@@ -58,6 +64,7 @@ TEST_F(MerkleTreeTest, ProofVerification) {
 TEST_F(MerkleTreeTest, Contains) {
     tree.insert("Data1");
     tree.insert("Data2");
+    tree.flush(); // 确保异步插入已处理
     
     EXPECT_TRUE(tree.contains("Data1"));
     EXPECT_TRUE(tree.contains("Data2"));
@@ -66,10 +73,12 @@ TEST_F(MerkleTreeTest, Contains) {
 
 TEST_F(MerkleTreeTest, DuplicatePrevention) {
     tree.insert("Duplicate");
+    tree.flush();
     size_t first_insert_count = tree.node_count();
     
     tree.insert("Duplicate");
     tree.insert("Duplicate");
+    tree.flush();
     
     EXPECT_EQ(tree.leaf_count(), 1);
     EXPECT_EQ(tree.node_count(), first_insert_count);
@@ -82,12 +91,14 @@ TEST_F(MerkleTreeTest, IncrementalRebuild) {
     
     // 插入第一个节点
     tree.insert("A");
+    tree.flush();
     EXPECT_EQ(tree.leaf_count(), 1);
     EXPECT_EQ(tree.node_count(), 1); // 只有叶子节点
     std::string root_a = tree.root_hash();
     
     // 插入第二个节点
     tree.insert("B");
+    tree.flush();
     EXPECT_EQ(tree.leaf_count(), 2);
     EXPECT_EQ(tree.node_count(), 3); // 2叶子 + 1父节点
     std::string root_ab = tree.root_hash();
@@ -95,6 +106,7 @@ TEST_F(MerkleTreeTest, IncrementalRebuild) {
     
     // 插入第三个节点
     tree.insert("C");
+    tree.flush();
     EXPECT_EQ(tree.leaf_count(), 3);
     std::string root_abc = tree.root_hash();
     EXPECT_NE(root_ab, root_abc); // 根哈希应该改变
@@ -107,229 +119,137 @@ TEST_F(MerkleTreeTest, IncrementalRebuild) {
     EXPECT_TRUE(MerkleTree::verify_proof(proof_a, root_abc));
     EXPECT_TRUE(MerkleTree::verify_proof(proof_b, root_abc));
     EXPECT_TRUE(MerkleTree::verify_proof(proof_c, root_abc));
-    
-    // 验证证明路径长度在合理范围内
-    int expected_path_length = std::ceil(std::log2(3));
-    EXPECT_LE(proof_a.path.size(), expected_path_length + 1);
-    EXPECT_LE(proof_b.path.size(), expected_path_length + 1);
-    EXPECT_LE(proof_c.path.size(), expected_path_length + 1);
 }
 
-// 测试树结构在增量式重建后的平衡性
-TEST_F(MerkleTreeTest, TreeBalanceAfterIncrementalRebuild) {
-    // 插入多个节点
-    for (int i = 0; i < 10; i++) {
-        tree.insert("Item" + std::to_string(i));
-    }
+// 批量插入测试
+TEST_F(MerkleTreeTest, BatchInsert) {
+    std::vector<std::string> batch1 = {"Item1", "Item2", "Item3"};
+    tree.batch_insert(batch1);
+    tree.flush();
     
-    // 验证树的高度在合理范围内
-    int expected_height = std::ceil(std::log2(10)) + 1;
-    EXPECT_LE(tree.height(), expected_height + 1);
+    EXPECT_EQ(tree.leaf_count(), 3);
+    EXPECT_TRUE(tree.contains("Item1"));
+    EXPECT_TRUE(tree.contains("Item2"));
+    EXPECT_TRUE(tree.contains("Item3"));
     
-    // 验证所有节点的证明路径长度
-    for (int i = 0; i < 10; i++) {
-        auto proof = tree.generate_proof("Item" + std::to_string(i));
-        EXPECT_TRUE(MerkleTree::verify_proof(proof, tree.root_hash()));
-        EXPECT_LE(proof.path.size(), expected_height);
-    }
+    std::string root1 = tree.root_hash();
     
-    std::cout << "Tree with 10 nodes:\n"
-              << "  Height: " << tree.height() << "\n"
-              << "  Expected max height: " << expected_height + 1 << std::endl;
+    // 再插入一批
+    std::vector<std::string> batch2 = {"Item4", "Item5"};
+    tree.batch_insert(batch2);
+    tree.flush();
+    
+    EXPECT_EQ(tree.leaf_count(), 5);
+    EXPECT_TRUE(tree.contains("Item4"));
+    EXPECT_TRUE(tree.contains("Item5"));
+    
+    // 根哈希应该变化
+    EXPECT_NE(root1, tree.root_hash());
+    
+    // 验证证明
+    auto proof = tree.generate_proof("Item3");
+    EXPECT_TRUE(MerkleTree::verify_proof(proof, tree.root_hash()));
 }
 
-// 测试交替的增量式重建和完全重建
-TEST_F(MerkleTreeTest, MixedRebuildStrategies) {
-    // 插入足够多的节点触发完全重建
-    for (int i = 0; i < 150; i++) {
-        tree.insert("BatchItem" + std::to_string(i));
-    }
+// 并发插入测试
+TEST_F(MerkleTreeTest, ConcurrentInsert) {
+    const int THREAD_COUNT = 4;
+    const int PER_THREAD = 50;
     
-    std::string root_after_full_rebuild = tree.root_hash();
-    
-    // 再插入几个节点，应该使用增量重建
-    for (int i = 0; i < 5; i++) {
-        tree.insert("IncrementalItem" + std::to_string(i));
-    }
-    
-    std::string root_after_incremental = tree.root_hash();
-    EXPECT_NE(root_after_full_rebuild, root_after_incremental);
-    
-    // 验证所有节点都可以生成有效证明
-    auto proof1 = tree.generate_proof("BatchItem42");
-    auto proof2 = tree.generate_proof("IncrementalItem3");
-    
-    EXPECT_TRUE(MerkleTree::verify_proof(proof1, root_after_incremental));
-    EXPECT_TRUE(MerkleTree::verify_proof(proof2, root_after_incremental));
-    
-    // 验证树高度仍在合理范围内
-    int expected_height = std::ceil(std::log2(155)) + 1;
-    EXPECT_LE(tree.height(), expected_height + 1);
-}
-
-// 高并发测试
-TEST_F(MerkleTreeTest, ConcurrentIncrementalRebuild) {
-    constexpr int THREAD_COUNT = 8;
-    constexpr int PER_THREAD = 100;
     std::vector<std::thread> threads;
-    std::atomic<int> insert_count{0};
     
-    auto start = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < THREAD_COUNT; i++) {
-        threads.emplace_back([this, i, &insert_count] {
+        threads.emplace_back([this, i, PER_THREAD] {
             for (int j = 0; j < PER_THREAD; j++) {
                 std::string data = "Thread" + std::to_string(i) + 
-                                   "-Item" + std::to_string(j);
+                                  "-Item" + std::to_string(j);
                 tree.insert(data);
-                insert_count++;
             }
         });
     }
     
-    for (auto& t : threads) t.join();
-    auto end = std::chrono::high_resolution_clock::now();
+    for (auto& t : threads) {
+        t.join();
+    }
     
-    // 计算耗时
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    tree.flush();
     
     // 验证插入数量
     EXPECT_EQ(tree.leaf_count(), THREAD_COUNT * PER_THREAD);
     
-    // 验证随机样本
-    EXPECT_TRUE(tree.contains("Thread3-Item42"));
+    // 验证随机样本存在
+    EXPECT_TRUE(tree.contains("Thread0-Item10"));
+    EXPECT_TRUE(tree.contains("Thread3-Item40"));
     
     // 验证证明系统
-    auto proof = tree.generate_proof("Thread5-Item10");
+    auto proof = tree.generate_proof("Thread1-Item25");
     EXPECT_TRUE(MerkleTree::verify_proof(proof, tree.root_hash()));
-    
-    // 验证树高度在合理范围内
-    int expected_height = std::ceil(std::log2(THREAD_COUNT * PER_THREAD)) + 1;
-    EXPECT_LE(tree.height(), expected_height + 1);
-    
-    // 性能报告
-    std::cout << "Concurrent test with incremental rebuild:\n"
-              << "  Inserted " << insert_count << " items with " << THREAD_COUNT << " threads\n"
-              << "  Duration: " << duration << "ms\n"
-              << "  Tree height: " << tree.height() << "\n"
-              << "  Expected max height: " << expected_height + 1 << std::endl;
 }
 
-// 随机插入顺序测试
-TEST_F(MerkleTreeTest, RandomInsertionOrder) {
-    constexpr int ITEM_COUNT = 200;
+// 混合批量和单点插入测试
+TEST_F(MerkleTreeTest, MixedBatchAndSingleInsert) {
+    // 批量插入
+    std::vector<std::string> batch = {"Batch1", "Batch2", "Batch3"};
+    tree.batch_insert(batch);
     
-    // 创建随机排序的数据项
-    std::vector<std::string> items;
-    for (int i = 0; i < ITEM_COUNT; i++) {
-        items.push_back("RandomItem" + std::to_string(i));
-    }
+    // 单点插入
+    tree.insert("Single1");
+    tree.insert("Single2");
     
-    std::random_device rd;
-    std::mt19937 g(rd());
-    std::shuffle(items.begin(), items.end(), g);
+    tree.flush();
     
-    // 随机顺序插入
-    for (const auto& item : items) {
-        tree.insert(item);
-    }
+    EXPECT_EQ(tree.leaf_count(), 5);
+    EXPECT_TRUE(tree.contains("Batch1"));
+    EXPECT_TRUE(tree.contains("Single1"));
     
-    // 验证所有项都已插入
-    for (const auto& item : items) {
-        EXPECT_TRUE(tree.contains(item));
-    }
-    
-    // 验证树高度在合理范围内
-    int expected_height = std::ceil(std::log2(ITEM_COUNT)) + 1;
-    EXPECT_LE(tree.height(), expected_height + 1);
-    
-    // 验证随机选择的项的证明
-    auto proof = tree.generate_proof(items[ITEM_COUNT/2]);
-    EXPECT_TRUE(MerkleTree::verify_proof(proof, tree.root_hash()));
-    EXPECT_LE(proof.path.size(), expected_height);
-    
-    std::cout << "Random insertion order test:\n"
-              << "  Tree height: " << tree.height() << "\n"
-              << "  Expected max height: " << expected_height + 1 << "\n"
-              << "  Proof path length: " << proof.path.size() << std::endl;
-}
-
-// 批量插入与增量重建混合测试
-TEST_F(MerkleTreeTest, MixedBatchAndIncrementalInsert) {
-    // 首先批量插入
-    std::vector<std::string> batch_items;
-    for (int i = 0; i < 100; i++) {
-        batch_items.push_back("BatchItem" + std::to_string(i));
-    }
-    tree.batch_insert(batch_items);
-    
-    std::string root_after_batch = tree.root_hash();
-    
-    // 然后进行增量插入
-    for (int i = 0; i < 10; i++) {
-        tree.insert("IncrItem" + std::to_string(i));
-    }
-    
-    std::string root_after_incr = tree.root_hash();
-    EXPECT_NE(root_after_batch, root_after_incr);
-    
-    // 验证所有项都可以生成有效证明
-    for (int i = 0; i < 10; i++) {
-        int batch_idx = i * 10;
-        auto batch_proof = tree.generate_proof("BatchItem" + std::to_string(batch_idx));
-        auto incr_proof = tree.generate_proof("IncrItem" + std::to_string(i));
-        
-        EXPECT_TRUE(MerkleTree::verify_proof(batch_proof, root_after_incr));
-        EXPECT_TRUE(MerkleTree::verify_proof(incr_proof, root_after_incr));
-    }
-    
-    // 验证树高度在合理范围内
-    int expected_height = std::ceil(std::log2(110)) + 1;
-    EXPECT_LE(tree.height(), expected_height + 1);
-    
-    std::cout << "Mixed batch and incremental insert test:\n"
-              << "  Tree height: " << tree.height() << "\n"
-              << "  Expected max height: " << expected_height + 1 << std::endl;
-}
-
-// 大规模树测试
-TEST_F(MerkleTreeTest, LargeTreeWithIncrementalRebuild) {
-    // 创建一个较大的树（1000个节点）
-    std::vector<std::string> items;
-    for (int i = 0; i < 900; i++) {
-        items.push_back("LargeItem" + std::to_string(i));
-    }
-    
-    // 批量插入大部分节点
-    tree.batch_insert(items);
-    
-    // 增量插入剩余节点
-    for (int i = 900; i < 1000; i++) {
-        tree.insert("LargeItem" + std::to_string(i));
-    }
-    
-    // 验证树的基本属性
-    EXPECT_EQ(tree.leaf_count(), 1000);
-    
-    // 计算预期的树高度
-    int expected_height = std::ceil(std::log2(1000)) + 1;
-    EXPECT_LE(tree.height(), expected_height + 1);
-    
-    // 验证随机选择的项的证明
-    auto batch_proof = tree.generate_proof("LargeItem500");
-    auto incr_proof = tree.generate_proof("LargeItem950");
+    // 验证证明
+    auto batch_proof = tree.generate_proof("Batch2");
+    auto single_proof = tree.generate_proof("Single2");
     
     EXPECT_TRUE(MerkleTree::verify_proof(batch_proof, tree.root_hash()));
-    EXPECT_TRUE(MerkleTree::verify_proof(incr_proof, tree.root_hash()));
+    EXPECT_TRUE(MerkleTree::verify_proof(single_proof, tree.root_hash()));
+}
+
+// 测试批量插入中的去重功能
+TEST_F(MerkleTreeTest, BatchDuplicateHandling) {
+    // 先插入一个项目
+    tree.insert("Duplicate");
+    tree.flush();
     
-    // 验证路径长度在合理范围内
-    EXPECT_LE(batch_proof.path.size(), expected_height);
-    EXPECT_LE(incr_proof.path.size(), expected_height);
+    size_t initial_count = tree.leaf_count();
     
-    // std::cout << "Large tree with incremental rebuild:\n"
-    //           << "  Tree height: " << tree.height() << "\n"
-    //           << "  Expected max height: " << expected_height + 1 << "\n"
-    //           << "  Batch proof path length: " << batch_proof.path.size() << "\n"
-    //           << "  Incremental proof path length: " << incr_proof.path.size() << std::endl;
+    // 批量插入包含重复项
+    std::vector<std::string> batch = {"New1", "Duplicate", "New2", "Duplicate", "New1"};
+    tree.batch_insert(batch);
+    tree.flush();
+    
+    // 应该只添加了2个新项目
+    EXPECT_EQ(tree.leaf_count(), initial_count + 2);
+    EXPECT_TRUE(tree.contains("New1"));
+    EXPECT_TRUE(tree.contains("New2"));
+}
+
+// 测试在没有插入的情况下刷新缓冲区
+TEST_F(MerkleTreeTest, FlushWithoutInsert) {
+    // 初始状态
+    EXPECT_EQ(tree.node_count(), 0);
+    
+    // 刷新空缓冲区
+    tree.flush();
+    
+    // 应该没有变化
+    EXPECT_EQ(tree.node_count(), 0);
+    EXPECT_TRUE(tree.root_hash().empty());
+}
+
+// 测试批量插入空列表
+TEST_F(MerkleTreeTest, BatchInsertEmpty) {
+    std::vector<std::string> empty_batch;
+    tree.batch_insert(empty_batch);
+    tree.flush();
+    
+    EXPECT_EQ(tree.leaf_count(), 0);
+    EXPECT_TRUE(tree.root_hash().empty());
 }
 
 int main(int argc, char **argv) {

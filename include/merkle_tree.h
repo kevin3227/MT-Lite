@@ -9,6 +9,9 @@
 #include <atomic>
 #include <cmath>
 #include <queue>
+#include <condition_variable>
+#include <thread>
+#include <functional>
 
 struct MerkleNode {
     std::string hash;
@@ -22,12 +25,21 @@ struct MerkleNode {
 
 class MerkleTree {
 public:
-    MerkleTree() = default;
+    MerkleTree();
+    ~MerkleTree();
     
+    // 使用缓冲区的异步插入
     void insert(const std::string& data);
     void batch_insert(const std::vector<std::string>& items);
+    
+    // 等待所有异步操作完成
+    void flush();
+    
     bool contains(const std::string& data) const;
-    std::string root_hash() const { return root_ ? root_->hash : ""; }
+    std::string root_hash() const { 
+        std::shared_lock lock(structure_mutex_);
+        return root_ ? root_->hash : ""; 
+    }
     
     struct Proof {
         std::vector<std::pair<bool, std::string>> path; // <isRight, hash>
@@ -40,7 +52,10 @@ public:
     
     // 性能分析接口
     size_t node_count() const { return node_counter_; }
-    size_t leaf_count() const { return leaf_map_.size(); }
+    size_t leaf_count() const { 
+        std::shared_lock lock(index_mutex_);
+        return leaf_map_.size();
+    }
     size_t height() const;
 
 private:
@@ -54,7 +69,28 @@ private:
     std::unordered_map<std::string, std::shared_ptr<MerkleNode>> leaf_map_;
     
     // 增量重建相关
-    static constexpr size_t REBUILD_THRESHOLD = 10000; // 完全重建阈值
+    static constexpr size_t REBUILD_THRESHOLD = 5000; // 完全重建阈值
+    static constexpr size_t BUFFER_CAPACITY = 1000;    // 插入缓冲区大小
+    static constexpr size_t FLUSH_THRESHOLD = 500;     // 触发刷新的阈值
+    
+    // 异步插入缓冲区
+    struct {
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::vector<std::string> items;
+        bool should_terminate = false;
+        std::atomic<bool> processing = false;
+        std::thread worker;
+    } buffer_;
+    
+    // 异步工作线程函数
+    void worker_thread();
+    
+    // 刷新缓冲区，执行批量插入
+    void process_buffered_items();
+    
+    // 内部批量插入实现
+    void internal_batch_insert(const std::vector<std::string>& items);
     
     std::shared_ptr<MerkleNode> build_parent(
         const std::shared_ptr<MerkleNode>& left,

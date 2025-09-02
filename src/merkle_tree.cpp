@@ -12,6 +12,89 @@ thread_local struct {
     bool initialized;
 } tls_hash_ctx = {nullptr, nullptr, false};
 
+MerkleTree::MerkleTree() {
+    // 启动工作线程
+    buffer_.worker = std::thread(&MerkleTree::worker_thread, this);
+}
+
+MerkleTree::~MerkleTree() {
+    // 停止工作线程
+    {
+        std::unique_lock<std::mutex> lock(buffer_.mutex);
+        buffer_.should_terminate = true;
+        buffer_.cv.notify_one();
+    }
+    
+    // 等待线程结束
+    if (buffer_.worker.joinable()) {
+        buffer_.worker.join();
+    }
+}
+
+void MerkleTree::worker_thread() {
+    while (true) {
+        std::vector<std::string> items_to_process;
+        
+        {
+            std::unique_lock<std::mutex> lock(buffer_.mutex);
+            
+            // 等待有数据或终止信号
+            buffer_.cv.wait(lock, [this] {
+                return !buffer_.items.empty() || buffer_.should_terminate;
+            });
+            
+            // 检查是否应该结束线程
+            if (buffer_.should_terminate && buffer_.items.empty()) {
+                break;
+            }
+            
+            // 获取所有项目并清空缓冲区
+            items_to_process.swap(buffer_.items);
+            buffer_.processing = true;
+        }
+        
+        // 处理项目
+        if (!items_to_process.empty()) {
+            internal_batch_insert(items_to_process);
+        }
+        
+        buffer_.processing = false;
+        buffer_.cv.notify_all(); // 通知等待flush的线程
+    }
+}
+
+void MerkleTree::process_buffered_items() {
+    std::vector<std::string> items_to_process;
+    
+    {
+        std::unique_lock<std::mutex> lock(buffer_.mutex);
+        items_to_process.swap(buffer_.items);
+    }
+    
+    if (!items_to_process.empty()) {
+        internal_batch_insert(items_to_process);
+    }
+}
+
+void MerkleTree::flush() {
+    {
+        std::unique_lock<std::mutex> lock(buffer_.mutex);
+        // 如果缓冲区非空，将数据移到临时缓冲区并处理
+        if (!buffer_.items.empty()) {
+            auto items = std::move(buffer_.items);
+            buffer_.items.clear();
+            lock.unlock();
+            
+            // 处理临时缓冲区中的数据
+            internal_batch_insert(items);
+        }
+    }
+    
+    // 等待所有异步操作完成
+    std::unique_lock<std::mutex> lock(buffer_.mutex);
+    buffer_.cv.wait(lock, [this] { return !buffer_.processing; });
+}
+
 std::string MerkleTree::hash_data(const std::string& data) {
     // 线程局部缓存，避免重复计算
     thread_local std::unordered_map<std::string, std::string> hash_cache;
@@ -40,6 +123,107 @@ std::string MerkleTree::hash_data(const std::string& data) {
     return result;
 }
 
+void MerkleTree::insert(const std::string& data) {
+    // 快速路径：检查是否已存在
+    {
+        const std::string target_hash = hash_data(data);
+        std::shared_lock read_lock(index_mutex_);
+        if (leaf_map_.find(target_hash) != leaf_map_.end()) return;
+    }
+    
+    // 添加到缓冲区
+    {
+        std::unique_lock<std::mutex> lock(buffer_.mutex);
+        buffer_.items.push_back(data);
+        
+        // 如果缓冲区达到阈值，唤醒工作线程
+        if (buffer_.items.size() >= FLUSH_THRESHOLD) {
+            lock.unlock();
+            buffer_.cv.notify_one();
+        }
+    }
+}
+
+void MerkleTree::batch_insert(const std::vector<std::string>& items) {
+    if (items.empty()) return;
+    
+    // 如果批量很大，直接处理
+    if (items.size() >= BUFFER_CAPACITY) {
+        internal_batch_insert(items);
+        return;
+    }
+    
+    // 否则添加到缓冲区
+    {
+        std::unique_lock<std::mutex> lock(buffer_.mutex);
+        
+        // 检查缓冲区容量
+        if (buffer_.items.size() + items.size() >= BUFFER_CAPACITY) {
+            // 如果添加这批会超过容量，先处理当前缓冲区
+            std::vector<std::string> current_items;
+            current_items.swap(buffer_.items);
+            lock.unlock();
+            
+            internal_batch_insert(current_items);
+            
+            // 重新获取锁
+            lock.lock();
+        }
+        
+        // 添加新项目到缓冲区
+        buffer_.items.insert(buffer_.items.end(), items.begin(), items.end());
+        
+        // 如果缓冲区达到阈值，唤醒工作线程
+        if (buffer_.items.size() >= FLUSH_THRESHOLD) {
+            lock.unlock();
+            buffer_.cv.notify_one();
+        }
+    }
+}
+
+void MerkleTree::internal_batch_insert(const std::vector<std::string>& items) {
+    if (items.empty()) return;
+    
+    // 预计算所有哈希
+    std::vector<std::pair<std::string, std::shared_ptr<MerkleNode>>> new_nodes;
+    new_nodes.reserve(items.size());
+    
+    for (const auto& item : items) {
+        std::string hash = hash_data(item);
+        new_nodes.emplace_back(hash, std::make_shared<MerkleNode>(hash));
+    }
+    
+    // 获取锁并执行插入
+    std::unique_lock idx_lock(index_mutex_);
+    
+    bool tree_modified = false;
+    std::vector<std::shared_ptr<MerkleNode>> inserted_nodes;
+    
+    // 过滤并添加新节点
+    for (const auto& [hash, node] : new_nodes) {
+        if (leaf_map_.count(hash) == 0) {
+            leaf_map_.emplace(hash, node);
+            node_counter_++;
+            tree_modified = true;
+            inserted_nodes.push_back(node);
+        }
+    }
+    
+    // 如果有新节点添加，重建树
+    if (tree_modified) {
+        std::unique_lock struct_lock(structure_mutex_);
+        
+        // 大规模更改使用完全重建，小规模可选择批量增量更新
+        if (leaf_map_.size() >= REBUILD_THRESHOLD || inserted_nodes.size() > 10) {
+            rebuild_tree();
+        } else {
+            for (const auto& node : inserted_nodes) {
+                incremental_rebuild(node);
+            }
+        }
+    }
+}
+
 std::shared_ptr<MerkleNode> MerkleTree::build_parent(
     const std::shared_ptr<MerkleNode>& left,
     const std::shared_ptr<MerkleNode>& right) {
@@ -57,7 +241,7 @@ std::shared_ptr<MerkleNode> MerkleTree::build_parent(
     node_counter_++;
     
     parent->left = left;
-    parent->right = right ? right : left; // 如果没有右子节点，使用左子节点
+    parent->right = right;
     left->parent = parent;
     if (right) right->parent = parent;
     
@@ -77,6 +261,13 @@ void MerkleTree::rebuild_tree() {
     
     // 如果没有节点，直接返回
     if (nodes.empty()) return;
+    
+    // 只有一个节点的情况
+    if (nodes.size() == 1) {
+        root_ = nodes[0];
+        version_++;
+        return;
+    }
     
     // 自底向上构建平衡树
     while (nodes.size() > 1) {
@@ -111,6 +302,24 @@ void MerkleTree::incremental_rebuild(const std::shared_ptr<MerkleNode>& new_leaf
         return;
     }
     
+    // 如果只有两个节点，创建一个简单的树
+    if (leaf_map_.size() == 2) {
+        // 找到另一个叶子节点
+        std::shared_ptr<MerkleNode> other_leaf = nullptr;
+        for (const auto& [hash, leaf] : leaf_map_) {
+            if (leaf != new_leaf) {
+                other_leaf = leaf;
+                break;
+            }
+        }
+        
+        if (other_leaf) {
+            root_ = build_parent(other_leaf, new_leaf);
+            version_++;
+        }
+        return;
+    }
+    
     // 特殊处理 3 个节点的情况，确保与完全重建兼容
     if (leaf_map_.size() == 3) {
         // 收集所有叶子节点
@@ -134,25 +343,7 @@ void MerkleTree::incremental_rebuild(const std::shared_ptr<MerkleNode>& new_leaf
         return;
     }
     
-    // 如果只有两个节点，创建一个简单的树
-    if (leaf_map_.size() == 2) {
-        // 找到另一个叶子节点
-        std::shared_ptr<MerkleNode> other_leaf = nullptr;
-        for (const auto& [hash, leaf] : leaf_map_) {
-            if (leaf != new_leaf) {
-                other_leaf = leaf;
-                break;
-            }
-        }
-        
-        if (other_leaf) {
-            root_ = build_parent(other_leaf, new_leaf);
-            version_++;
-        }
-        return;
-    }
-    
-    // 其他情况使用原来的增量重建逻辑
+    // 其他情况使用增量重建逻辑
     // 查找合适的合并位置
     auto merge_candidate = find_merge_candidate(new_leaf);
     
@@ -246,73 +437,6 @@ void MerkleTree::update_path_hashes(const std::shared_ptr<MerkleNode>& from_node
     }
 }
 
-void MerkleTree::insert(const std::string& data) {
-    auto leaf_hash = hash_data(data);
-    
-    // 检查重复
-    {
-        std::shared_lock read_lock(index_mutex_);
-        if (leaf_map_.find(leaf_hash) != leaf_map_.end()) return;
-    }
-    
-    // 创建新叶子节点
-    auto leaf = std::make_shared<MerkleNode>(leaf_hash);
-    
-    std::unique_lock idx_lock(index_mutex_);
-    std::unique_lock struct_lock(structure_mutex_);
-    
-    // 再次检查重复
-    if (leaf_map_.count(leaf_hash)) return;
-    
-    // 添加到叶子映射
-    leaf_map_.emplace(leaf_hash, leaf);
-    node_counter_++;
-    
-    // 决定使用增量重建还是完全重建
-    if (leaf_map_.size() >= REBUILD_THRESHOLD || leaf_map_.size() <= 3) {
-        // 小树或大树使用完全重建
-        rebuild_tree();
-    } else {
-        // 中等大小的树使用增量重建
-        incremental_rebuild(leaf);
-    }
-}
-
-void MerkleTree::batch_insert(const std::vector<std::string>& items) {
-    if (items.empty()) return;
-    
-    // 预计算所有哈希
-    std::vector<std::string> hashes;
-    hashes.reserve(items.size());
-    
-    for (const auto& item : items) {
-        hashes.push_back(hash_data(item));
-    }
-    
-    // 批量更新
-    std::unique_lock idx_lock(index_mutex_);
-    std::unique_lock struct_lock(structure_mutex_);
-    
-    bool tree_modified = false;
-    
-    // 添加新节点
-    for (size_t i = 0; i < items.size(); i++) {
-        const auto& hash = hashes[i];
-        
-        if (leaf_map_.count(hash) == 0) {
-            auto leaf = std::make_shared<MerkleNode>(hash);
-            leaf_map_.emplace(hash, leaf);
-            node_counter_++;
-            tree_modified = true;
-        }
-    }
-    
-    // 只在有变更时重建树
-    if (tree_modified) {
-        rebuild_tree();
-    }
-}
-
 bool MerkleTree::contains(const std::string& data) const {
     const std::string target_hash = hash_data(data);
     
@@ -327,9 +451,6 @@ MerkleTree::Proof MerkleTree::generate_proof(const std::string& data) const {
     Proof proof;
     const std::string target_hash = hash_data(data);
     
-    // 保护整个操作，避免树结构变化
-    std::shared_lock read_lock(structure_mutex_);
-    
     // 查找叶子节点
     std::shared_ptr<MerkleNode> leaf_node = nullptr;
     {
@@ -338,6 +459,9 @@ MerkleTree::Proof MerkleTree::generate_proof(const std::string& data) const {
         if (it == leaf_map_.end()) return proof;
         leaf_node = it->second;
     }
+    
+    // 保护树结构访问
+    std::shared_lock read_lock(structure_mutex_);
     
     // 设置叶子哈希
     proof.leaf = target_hash;
