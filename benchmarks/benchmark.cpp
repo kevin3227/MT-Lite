@@ -35,7 +35,10 @@ static void BM_SingleInsert(benchmark::State& state) {
     // 确保测试结束后所有插入被处理
     state.PauseTiming();
     tree.flush();
-    state.counters["final_leaf_count"] = tree.leaf_count();
+    state.ResumeTiming();
+    
+    // 吞吐量统计
+    state.SetItemsProcessed(state.iterations());
 }
 
 // 基准测试：批量插入性能
@@ -57,7 +60,7 @@ static void BM_BatchInsert(benchmark::State& state) {
 // 基准测试：异步模式下多线程并发插入
 static void BM_ConcurrentInsert(benchmark::State& state) {
     const int thread_count = state.range(0);
-    const int items_per_thread = 1000;
+    const int items_per_thread = 100000;
     auto data_items = generate_test_data(items_per_thread * thread_count);
     
     for (auto _ : state) {
@@ -151,19 +154,23 @@ static void BM_MixedOperations(benchmark::State& state) {
     state.SetItemsProcessed(state.iterations() * ops_count);
 }
 
-// BENCHMARK(BM_SingleInsert)
-//     ->Arg(1000)
-//     ->Unit(benchmark::kMicrosecond);
+BENCHMARK(BM_SingleInsert)
+    ->Arg(10000)
+    ->Arg(100000)
+    ->Arg(1000000)
+    ->Unit(benchmark::kMicrosecond);
 
 BENCHMARK(BM_BatchInsert)
-    ->Arg(1000)
     ->Arg(10000)
+    ->Arg(100000)
+    ->Arg(1000000)
     ->Unit(benchmark::kMillisecond);
 
 BENCHMARK(BM_ConcurrentInsert)
     ->Arg(2)
     ->Arg(4)
     ->Arg(8)
+    ->Arg(16)
     ->Unit(benchmark::kMillisecond);
 
 BENCHMARK(BM_Contains)

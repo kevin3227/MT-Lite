@@ -35,6 +35,15 @@ else()
   message(STATUS "Found OpenSSL ssl: ${OPENSSL_SSL_LIBRARY}")
 endif()
 
+find_package(OpenMP REQUIRED)
+if(OpenMP_CXX_FOUND)
+    message(STATUS "Found OpenMP support")
+    add_compile_options(${OpenMP_CXX_FLAGS})
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+else()
+    message(WARNING "OpenMP not found - parallelization disabled")
+endif()
+
 # 主库目标
 add_library(merkle_tree STATIC src/merkle_tree.cpp)
 target_include_directories(merkle_tree PUBLIC 
@@ -46,6 +55,8 @@ target_include_directories(merkle_tree PUBLIC
 target_link_libraries(merkle_tree PRIVATE 
   ${OPENSSL_SSL_LIBRARY}
   ${OPENSSL_CRYPTO_LIBRARY}
+  OpenMP::OpenMP_CXX
+  tbb
 )
 
 # 测试配置

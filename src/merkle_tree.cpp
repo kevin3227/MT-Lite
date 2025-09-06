@@ -4,6 +4,7 @@
 #include <cstring>
 #include <openssl/evp.h>
 #include <numeric>
+#include <omp.h>
 
 // 线程局部哈希上下文
 thread_local struct {
@@ -127,7 +128,7 @@ void MerkleTree::insert(const std::string& data) {
     // 快速路径：检查是否已存在
     {
         const std::string target_hash = hash_data(data);
-        std::shared_lock read_lock(index_mutex_);
+        // std::shared_lock read_lock(index_mutex_);
         if (leaf_map_.find(target_hash) != leaf_map_.end()) return;
     }
     
@@ -184,17 +185,23 @@ void MerkleTree::batch_insert(const std::vector<std::string>& items) {
 void MerkleTree::internal_batch_insert(const std::vector<std::string>& items) {
     if (items.empty()) return;
     
-    // 预计算所有哈希
-    std::vector<std::pair<std::string, std::shared_ptr<MerkleNode>>> new_nodes;
+    // 并行计算所有数据的哈希
+    std::unordered_map<std::string, std::shared_ptr<MerkleNode>> new_nodes;
     new_nodes.reserve(items.size());
-    
-    for (const auto& item : items) {
-        std::string hash = hash_data(item);
-        new_nodes.emplace_back(hash, std::make_shared<MerkleNode>(hash));
-    }
+    #pragma omp parallel for schedule(dynamic, 256)
+    for (int i = 0; i < items.size(); ++i) {
+        const auto& data = items[i];
+        const std::string hash = hash_data(data);
+        auto node = std::make_shared<MerkleNode>(hash);
+        
+        #pragma omp critical
+        {
+            new_nodes.emplace(hash, node);
+        }
+    }    
     
     // 获取锁并执行插入
-    std::unique_lock idx_lock(index_mutex_);
+    // std::unique_lock idx_lock(index_mutex_);
     
     bool tree_modified = false;
     std::vector<std::shared_ptr<MerkleNode>> inserted_nodes;
@@ -253,44 +260,39 @@ void MerkleTree::rebuild_tree() {
     root_ = nullptr;
     
     // 收集所有叶子节点
-    std::vector<std::shared_ptr<MerkleNode>> nodes;
-    nodes.reserve(leaf_map_.size());
+    std::vector<std::shared_ptr<MerkleNode>> current_level;
+    current_level.reserve(leaf_map_.size());
     for (const auto& [hash, leaf] : leaf_map_) {
-        nodes.push_back(leaf);
+        current_level.push_back(leaf);
     }
     
-    // 如果没有节点，直接返回
-    if (nodes.empty()) return;
-    
-    // 只有一个节点的情况
-    if (nodes.size() == 1) {
-        root_ = nodes[0];
+    if (current_level.empty()) return;
+    if (current_level.size() == 1) {
+        root_ = current_level[0];
         version_++;
         return;
     }
     
-    // 自底向上构建平衡树
-    while (nodes.size() > 1) {
+    // 并行构建树层
+    while (current_level.size() > 1) {
         std::vector<std::shared_ptr<MerkleNode>> next_level;
-        next_level.reserve((nodes.size() + 1) / 2);
+        next_level.resize((current_level.size() + 1) / 2);
         
-        for (size_t i = 0; i < nodes.size(); i += 2) {
-            if (i + 1 < nodes.size()) {
-                // 有右节点，创建完整父节点
-                auto parent = build_parent(nodes[i], nodes[i+1]);
-                next_level.push_back(parent);
+        // 并行处理每对节点
+        #pragma omp parallel for schedule(dynamic, 256)
+        for (int i = 0; i < current_level.size(); i += 2) {
+            if (i + 1 < current_level.size()) {
+                next_level[i/2] = build_parent(current_level[i], current_level[i+1]);
             } else {
-                // 没有右节点，单独提升
-                auto parent = build_parent(nodes[i], nullptr);
-                next_level.push_back(parent);
+                next_level[i/2] = build_parent(current_level[i], nullptr);
             }
         }
         
-        nodes = std::move(next_level);
+        current_level = std::move(next_level);
     }
     
     // 设置根节点
-    root_ = nodes[0];
+    root_ = current_level[0];
     version_++;
 }
 
@@ -441,7 +443,7 @@ bool MerkleTree::contains(const std::string& data) const {
     const std::string target_hash = hash_data(data);
     
     // 使用读写锁的读锁保护索引访问
-    std::shared_lock lock(index_mutex_);
+    // std::shared_lock lock(index_mutex_);
     
     // 直接查找哈希值是否存在
     return leaf_map_.find(target_hash) != leaf_map_.end();
@@ -454,7 +456,7 @@ MerkleTree::Proof MerkleTree::generate_proof(const std::string& data) const {
     // 查找叶子节点
     std::shared_ptr<MerkleNode> leaf_node = nullptr;
     {
-        std::shared_lock idx_lock(index_mutex_);
+        // std::shared_lock idx_lock(index_mutex_);
         auto it = leaf_map_.find(target_hash);
         if (it == leaf_map_.end()) return proof;
         leaf_node = it->second;

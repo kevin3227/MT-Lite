@@ -5,7 +5,8 @@
 #include <stack>
 #include <mutex>
 #include <shared_mutex>
-#include <unordered_map>
+// #include <unordered_map>
+#include <tbb/concurrent_unordered_map.h>
 #include <atomic>
 #include <cmath>
 #include <queue>
@@ -53,7 +54,7 @@ public:
     // 性能分析接口
     size_t node_count() const { return node_counter_; }
     size_t leaf_count() const { 
-        std::shared_lock lock(index_mutex_);
+        // std::shared_lock lock(index_mutex_);
         return leaf_map_.size();
     }
     size_t height() const;
@@ -61,12 +62,13 @@ public:
 private:
     std::shared_ptr<MerkleNode> root_;
     std::atomic<size_t> node_counter_{0};
-    mutable std::shared_mutex index_mutex_;
+    // mutable std::shared_mutex index_mutex_;
     mutable std::shared_mutex structure_mutex_;
     std::atomic<uint64_t> version_{0};
     
     // 存储结构优化关键点：叶子节点哈希映射
-    std::unordered_map<std::string, std::shared_ptr<MerkleNode>> leaf_map_;
+    // std::unordered_map<std::string, std::shared_ptr<MerkleNode>> leaf_map_;
+    tbb::concurrent_unordered_map<std::string, std::shared_ptr<MerkleNode>> leaf_map_;
     
     // 增量重建相关
     static constexpr size_t REBUILD_THRESHOLD = 5000; // 完全重建阈值
