@@ -252,6 +252,115 @@ TEST_F(MerkleTreeTest, BatchInsertEmpty) {
     EXPECT_TRUE(tree.root_hash().empty());
 }
 
+// 快照功能测试
+TEST_F(MerkleTreeTest, CreateSnapshot) {
+    // 创建初始树
+    tree.insert("A");
+    tree.insert("B");
+    tree.insert("C");
+    tree.flush();
+    
+    // 记录初始状态
+    std::string original_root = tree.root_hash();
+    size_t original_size = tree.leaf_count();
+    
+    // 创建快照
+    auto snapshot = tree.create_snapshot();
+    
+    // 确认快照正确保存了状态
+    EXPECT_EQ(snapshot->root_hash(), original_root);
+    EXPECT_EQ(snapshot->size(), original_size);
+    EXPECT_TRUE(snapshot->contains("A"));
+    EXPECT_TRUE(snapshot->contains("B"));
+    EXPECT_TRUE(snapshot->contains("C"));
+    
+    // 修改原树
+    tree.insert("D");
+    tree.insert("E");
+    tree.flush();
+    
+    // 确认原树已修改
+    EXPECT_NE(tree.root_hash(), original_root);
+    EXPECT_EQ(tree.leaf_count(), original_size + 2);
+    
+    // 确认快照保持不变
+    EXPECT_EQ(snapshot->root_hash(), original_root);
+    EXPECT_EQ(snapshot->size(), original_size);
+    EXPECT_FALSE(snapshot->contains("D"));
+}
+
+TEST_F(MerkleTreeTest, GenerateProofFromSnapshot) {
+    // 创建初始树
+    tree.insert("Data1");
+    tree.insert("Data2");
+    tree.insert("Data3");
+    tree.flush();
+    
+    // 创建快照
+    auto snapshot = tree.create_snapshot();
+    
+    // 从快照生成证明
+    auto proof = snapshot->generate_proof("Data2");
+    
+    // 验证证明
+    EXPECT_TRUE(MerkleTree::verify_proof(proof, snapshot->root_hash()));
+    
+    // 修改原树后，快照的证明仍然有效
+    tree.insert("Data4");
+    tree.flush();
+    
+    EXPECT_TRUE(MerkleTree::verify_proof(proof, snapshot->root_hash()));
+}
+
+TEST_F(MerkleTreeTest, ResetToSnapshot) {
+    // 创建初始树
+    tree.insert("A");
+    tree.insert("B");
+    tree.flush();
+    
+    std::string original_root = tree.root_hash();
+    
+    // 创建快照
+    auto snapshot = tree.create_snapshot();
+    
+    // 修改树
+    tree.insert("C");
+    tree.insert("D");
+    tree.flush();
+    
+    std::string modified_root = tree.root_hash();
+    EXPECT_NE(original_root, modified_root);
+    
+    // 重置到快照
+    tree.reset_to_snapshot(snapshot);
+    
+    // 验证树已重置
+    EXPECT_EQ(tree.root_hash(), original_root);
+    EXPECT_EQ(tree.leaf_count(), 2);
+    EXPECT_TRUE(tree.contains("A"));
+    EXPECT_TRUE(tree.contains("B"));
+    EXPECT_FALSE(tree.contains("C"));
+    EXPECT_FALSE(tree.contains("D"));
+}
+
+TEST_F(MerkleTreeTest, ClearTree) {
+    // 填充树
+    tree.insert("A");
+    tree.insert("B");
+    tree.flush();
+    
+    EXPECT_EQ(tree.leaf_count(), 2);
+    EXPECT_FALSE(tree.root_hash().empty());
+    
+    // 清空树
+    tree.clear();
+    
+    // 验证树已清空
+    EXPECT_EQ(tree.leaf_count(), 0);
+    EXPECT_TRUE(tree.root_hash().empty());
+    EXPECT_FALSE(tree.contains("A"));
+}
+
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
