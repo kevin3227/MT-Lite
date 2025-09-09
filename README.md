@@ -18,60 +18,50 @@ MT-Lite/
 ## 📌 Features
 
 - 🔥 [High Performance]
-  - Single insert: ~200 ns
-  - Proof generation: ~0.5 μs
-  - Proof verification: ~1 μs
-  - 10,000 node memory overhead: ~1.5MB
+  - Thread-local hashing with SHA3 optimization
+  - Cache-aware node memory layout
+  - Parallel tree construction
+  - Batch processing pipeline
 
-- 🧮 [Efficient Batch Operations]
-  - 1,000 inserts/commit: ~0.5 ms
-  - 10,000 inserts/commit: ~10 ms
+- 🧮 [Efficient Batch Operations] 
+  - Asynchronous buffered inserts
+  - Dynamic rebuild thresholds
+  - Parallel hash computation
+  - Smart merge candidates
 
 - ⚛️ [Atomic Tree Operations]
-  - Thread-safe inserts with versioning
-  - Cache-optimized memory layout
-  - Batch digest computation
-  - Read-optimized node struct
+  - Versioned snapshots
+  - Thread-safe state transitions
+  - Lock-free leaf lookups
+  - Consistent proof generation
 
 - 🔐 [Cryptographic Grade]
-  - SHA3-256 secure hashing
-  - Digest caching mechanism
-  - Perfect hash comparisons
+  - SHA3-256 hashing
+  - Digest caching
+  - Tamper-evident structure
+  - Proof consistency checks
 
 - 🧭 [Proof Utilities]
-  - Logarithmic path length
-  - Strong consistency model
-  - Verification operator
+  - Snapshot isolation
+  - Historical verification
+  - State rollback capability
+  - Versioned root hashes
 
 ## 🚀 Why This Implementation Stands Out
 
-Through benchmarks and code analysis we see unique strengths:
+Through architectural analysis we observe unique advantages:
 
-- **Thread-local hashing**: SHA3 optimized with TLS context
-- **Cache-aware nodes**: Memory layout optimized for cache residency
-- **Intelligent updaters**: Keeps tree balanced through clever merge candidates
-- **Sample caching**: Avoids recomputing known hashes
+- **Asynchronous pipeline**: Decouples insertion from processing
+- **Hybrid rebuild strategy**: Balances incremental vs full rebuilds
+- **Snapshot isolation**: Provides point-in-time consistency
+- **Parallel construction**: Leverages multi-core architectures
 
-This provides sweet spots at:
+Key architectural sweet spots:
 
-- 3,000 concurrent seals
-- 10,000 entries / root commitment
-- O(log n) proof depth guaranteed
-
-## 🔧 Building the Merkle Tree
-
-The tree uses a bottom-up construction approach:
-
-```cpp
-tree.insert("data");
-proof = tree.generate_proof("data");
-valid = MerkleTree::verify_proof(proof, tree.root_hash());
-```
-
-You get:
-- `proof.path`: Vector of `(isRight, hash)` tuples
-- `proof.leaf`: The initial hash
-- Constant-time insert lookup with `contains`
+- High-throughput concurrent modifications
+- Low-latency proof generation
+- Consistent historical views
+- Efficient large-scale validation
 
 ## 📦 Installation
 
@@ -84,19 +74,6 @@ mkdir build
 cd build
 cmake ..
 make -j
-```
-
-## ⚙️ Usage
-
-```cpp
-MerkleTree tree;
-tree.insert("important_data");
-
-bool present = tree.contains("important_data");
-MerkleTree::Proof proof = tree.generate_proof("important_data");
-bool valid = MerkleTree::verify_proof(proof, tree.root_hash());
-
-size_t tree_height = tree.height();
 ```
 
 ## 🧪 Testing
