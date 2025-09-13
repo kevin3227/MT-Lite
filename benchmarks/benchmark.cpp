@@ -154,17 +154,15 @@ static void BM_MixedOperations(benchmark::State& state) {
     state.SetItemsProcessed(state.iterations() * ops_count);
 }
 
-// BENCHMARK(BM_SingleInsert)
-//     ->Arg(10000)
-//     ->Arg(100000)
-//     ->Arg(1000000)
-//     ->Unit(benchmark::kMicrosecond);
+BENCHMARK(BM_SingleInsert)
+    ->Arg(1)
+    ->Unit(benchmark::kMicrosecond);
 
-// BENCHMARK(BM_BatchInsert)
-//     ->Arg(10000)
-//     ->Arg(100000)
-//     ->Arg(1000000)
-//     ->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_BatchInsert)
+    ->Arg(10000)
+    ->Arg(100000)
+    ->Arg(1000000)
+    ->Unit(benchmark::kMillisecond);
 
 BENCHMARK(BM_ConcurrentInsert)
     ->Arg(2)

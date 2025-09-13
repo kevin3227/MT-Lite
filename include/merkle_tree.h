@@ -12,6 +12,7 @@
 #include <condition_variable>
 #include <thread>
 #include <functional>
+#include <unordered_set>
 
 struct MerkleNode {
     std::string hash;
@@ -19,41 +20,17 @@ struct MerkleNode {
     std::shared_ptr<MerkleNode> right;
     std::weak_ptr<MerkleNode> parent;
 
+    std::atomic<size_t> ref_count{1};
     explicit MerkleNode(std::string hash) 
         : hash(std::move(hash)), left(nullptr), right(nullptr) {}
 };
 
 class MerkleTree {
 public:
-    MerkleTree();
-    ~MerkleTree();
-    
-    // 使用缓冲区的异步插入
-    void insert(const std::string& data);
-    void batch_insert(const std::vector<std::string>& items);
-    
-    // 等待所有异步操作完成
-    void flush();
-    
-    bool contains(const std::string& data) const;
-    std::string root_hash() const { 
-        std::shared_lock lock(structure_mutex_);
-        return root_ ? root_->hash : ""; 
-    }
-    
     struct Proof {
         std::vector<std::pair<bool, std::string>> path; // <isRight, hash>
         std::string leaf;
     };
-    
-    static std::string hash_data(const std::string& data);
-    Proof generate_proof(const std::string& data) const;
-    static bool verify_proof(const Proof& proof, const std::string& root_hash);
-    
-    // 性能分析接口
-    size_t node_count() const { return node_counter_; }
-    size_t leaf_count() const { return leaf_map_.size(); }
-    size_t height() const;
 
     // 快照相关类型和方法
     class Snapshot {
@@ -63,6 +40,8 @@ public:
         Snapshot(uint64_t version, 
                  std::shared_ptr<MerkleNode> root,
                  const tbb::concurrent_unordered_map<std::string, std::shared_ptr<MerkleNode>>& leaf_map);
+
+        ~Snapshot();
 
         // 从快照生成证明
         Proof generate_proof(const std::string& data) const;
@@ -85,6 +64,15 @@ public:
         uint64_t version_;
         std::shared_ptr<MerkleNode> root_;
         tbb::concurrent_unordered_map<std::string, std::shared_ptr<MerkleNode>> leaf_map_;
+
+        // 递归增加节点引用计数
+        void increment_ref_counts(const std::shared_ptr<MerkleNode>& node);
+        
+        // 递归减少节点引用计数
+        void decrement_ref_counts(const std::shared_ptr<MerkleNode>& node);
+        
+        // 加入树的节点集合
+        std::unordered_set<std::shared_ptr<MerkleNode>> referenced_nodes_;
     };
     
     // 创建当前树的快照
@@ -95,6 +83,51 @@ public:
     
     // 清空树
     void clear();
+    
+    // 检查节点是否被快照引用
+    bool is_node_shared(const std::shared_ptr<MerkleNode>& node) const;
+    
+    std::shared_ptr<MerkleNode> get_writable_node(
+        const std::shared_ptr<MerkleNode>& node);
+    
+    // 替换修改路径上的所有节点
+    std::shared_ptr<MerkleNode> clone_path_to_root(
+        const std::shared_ptr<MerkleNode>& from_node);
+
+    // 创建一个节点的深拷贝
+    std::shared_ptr<MerkleNode> deep_copy_node(
+        const std::shared_ptr<MerkleNode>& node,
+        std::unordered_map<std::shared_ptr<MerkleNode>, std::shared_ptr<MerkleNode>>& node_map);
+
+/*************************************************************************/
+
+    MerkleTree();
+    ~MerkleTree();
+    
+    // 使用缓冲区的异步插入
+    void insert(const std::string& data);
+    void batch_insert(const std::vector<std::string>& items);
+    
+    // 等待所有异步操作完成
+    void flush();
+    
+    bool contains(const std::string& data) const;
+    std::string root_hash() const { 
+        std::shared_lock lock(structure_mutex_);
+        return root_ ? root_->hash : ""; 
+    }
+    
+    static std::string hash_data(const std::string& data);
+    Proof generate_proof(const std::string& data) const;
+    static bool verify_proof(const Proof& proof, const std::string& root_hash);
+    
+    // 性能分析接口
+    size_t node_count() const { return node_counter_; }
+    size_t leaf_count() const { return leaf_map_.size(); }
+    size_t height() const;
+
+    std::vector<std::weak_ptr<Snapshot>> active_snapshots_;
+    mutable std::mutex snapshots_mutex_;
 
 private:
     std::shared_ptr<MerkleNode> root_;
@@ -147,9 +180,4 @@ private:
     void update_path_hashes(const std::shared_ptr<MerkleNode>& from_node);
     
     size_t calculate_height(const std::shared_ptr<MerkleNode>& node) const;
-    
-    // 创建一个节点的深拷贝，用于快照
-    std::shared_ptr<MerkleNode> deep_copy_node(
-        const std::shared_ptr<MerkleNode>& node,
-        std::unordered_map<std::shared_ptr<MerkleNode>, std::shared_ptr<MerkleNode>>& node_map);
 };

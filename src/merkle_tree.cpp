@@ -204,9 +204,6 @@ void MerkleTree::internal_batch_insert(const std::vector<std::string>& items) {
         }
     }    
     
-    // 获取锁并执行插入
-    // std::unique_lock idx_lock(index_mutex_);
-    
     bool tree_modified = false;
     std::vector<std::shared_ptr<MerkleNode>> inserted_nodes;
     
@@ -223,6 +220,11 @@ void MerkleTree::internal_batch_insert(const std::vector<std::string>& items) {
     // 如果有新节点添加，重建树
     if (tree_modified) {
         std::unique_lock struct_lock(structure_mutex_);
+        
+        // 如果根节点共享，创建一个新的根节点
+        if (root_ && is_node_shared(root_)) {
+            root_ = get_writable_node(root_);
+        }
         
         // 大规模更改使用完全重建，小规模可选择批量增量更新
         if (leaf_map_.size() >= REBUILD_THRESHOLD || inserted_nodes.size() > 10) {
@@ -260,17 +262,27 @@ std::shared_ptr<MerkleNode> MerkleTree::build_parent(
 }
 
 void MerkleTree::rebuild_tree() {
-    // 清空现有树结构
-    root_ = nullptr;
-    
     // 收集所有叶子节点
     std::vector<std::shared_ptr<MerkleNode>> current_level;
     current_level.reserve(leaf_map_.size());
+    
+    // 检查所有叶子节点，需要时创建副本
     for (const auto& [hash, leaf] : leaf_map_) {
-        current_level.push_back(leaf);
+        if (is_node_shared(leaf)) {
+            auto writable_leaf = get_writable_node(leaf);
+            leaf_map_[hash] = writable_leaf; // 更新叶子映射
+            current_level.push_back(writable_leaf);
+        } else {
+            current_level.push_back(leaf);
+        }
     }
     
-    if (current_level.empty()) return;
+    if (current_level.empty()) {
+        root_ = nullptr;
+        version_++;
+        return;
+    }
+    
     if (current_level.size() == 1) {
         root_ = current_level[0];
         version_++;
@@ -320,6 +332,11 @@ void MerkleTree::incremental_rebuild(const std::shared_ptr<MerkleNode>& new_leaf
         }
         
         if (other_leaf) {
+            // 检查other_leaf是否共享
+            if (is_node_shared(other_leaf)) {
+                other_leaf = get_writable_node(other_leaf);
+            }
+            
             root_ = build_parent(other_leaf, new_leaf);
             version_++;
         }
@@ -333,6 +350,13 @@ void MerkleTree::incremental_rebuild(const std::shared_ptr<MerkleNode>& new_leaf
         leaves.reserve(3);
         for (const auto& [hash, leaf] : leaf_map_) {
             leaves.push_back(leaf);
+        }
+        
+        // 检查叶子节点是否共享
+        for (int i = 0; i < leaves.size(); i++) {
+            if (is_node_shared(leaves[i])) {
+                leaves[i] = get_writable_node(leaves[i]);
+            }
         }
         
         // 创建一个完全二叉树结构
@@ -354,8 +378,37 @@ void MerkleTree::incremental_rebuild(const std::shared_ptr<MerkleNode>& new_leaf
     auto merge_candidate = find_merge_candidate(new_leaf);
     
     if (merge_candidate) {
-        // 如果找到合适的合并位置，创建新的子树
+        // 如果找到合适的合并位置，检查是否需要复制
+        if (is_node_shared(merge_candidate)) {
+            merge_candidate = get_writable_node(merge_candidate);
+        }
+        
+        // 获取父节点
         auto parent = merge_candidate->parent.lock();
+        
+        // 检查是否需要克隆父节点路径
+        if (parent && is_node_shared(parent)) {
+            // 克隆整个路径到根
+            auto new_parent = clone_path_to_root(parent);
+            
+            // 更新父子关系
+            if (parent->left == merge_candidate) {
+                new_parent->left = merge_candidate;
+            } else if (parent->right == merge_candidate) {
+                new_parent->right = merge_candidate;
+            }
+            merge_candidate->parent = new_parent;
+            
+            // 如果原始父节点是根，更新根节点
+            if (parent == root_) {
+                root_ = new_parent;
+            }
+            
+            // 使用新的父节点
+            parent = new_parent;
+        }
+        
+        // 创建新的子树
         auto new_subtree = build_parent(merge_candidate, new_leaf);
         
         if (parent) {
@@ -374,8 +427,14 @@ void MerkleTree::incremental_rebuild(const std::shared_ptr<MerkleNode>& new_leaf
             root_ = new_subtree;
         }
     } else {
-        // 如果没有找到合适的合并位置，创建新的根
+        // 如果没有找到合适的合并位置
+        // 检查根节点是否共享
         auto old_root = root_;
+        if (is_node_shared(old_root)) {
+            old_root = get_writable_node(old_root);
+        }
+        
+        // 创建新的根
         root_ = build_parent(old_root, new_leaf);
     }
     
@@ -426,6 +485,36 @@ void MerkleTree::update_path_hashes(const std::shared_ptr<MerkleNode>& from_node
     auto current = from_node;
     
     while (current) {
+        // 确保当前节点可写
+        if (is_node_shared(current)) {
+            auto writable_current = get_writable_node(current);
+            
+            // 更新父子关系
+            auto parent = current->parent.lock();
+            if (parent) {
+                if (parent->left == current) {
+                    parent->left = writable_current;
+                } else if (parent->right == current) {
+                    parent->right = writable_current;
+                }
+            }
+            
+            // 更新左右子节点的父指针
+            if (writable_current->left) {
+                writable_current->left->parent = writable_current;
+            }
+            if (writable_current->right) {
+                writable_current->right->parent = writable_current;
+            }
+            
+            // 如果是根节点，更新根指针
+            if (current == root_) {
+                root_ = writable_current;
+            }
+            
+            current = writable_current;
+        }
+        
         // 重新计算当前节点的哈希
         std::string combined_hash;
         if (current->left && current->right) {
@@ -438,8 +527,37 @@ void MerkleTree::update_path_hashes(const std::shared_ptr<MerkleNode>& from_node
             current->hash = hash_data(combined_hash);
         }
         
-        // 向上移动到父节点
-        current = current->parent.lock();
+        // 获取父节点，确保它也是可写的
+        auto parent = current->parent.lock();
+        if (parent && is_node_shared(parent)) {
+            auto writable_parent = get_writable_node(parent);
+            
+            // 更新父子关系
+            if (parent->left == current) {
+                writable_parent->left = current;
+            } else if (parent->right == current) {
+                writable_parent->right = current;
+            }
+            current->parent = writable_parent;
+            
+            // 如果父节点是根节点，更新根
+            if (parent == root_) {
+                root_ = writable_parent;
+            }
+            
+            // 更新父节点的其他子节点的父指针
+            if (writable_parent->left && writable_parent->left != current) {
+                writable_parent->left->parent = writable_parent;
+            }
+            if (writable_parent->right && writable_parent->right != current) {
+                writable_parent->right->parent = writable_parent;
+            }
+            
+            // 更新父节点引用
+            parent = writable_parent;
+        }
+        
+        current = parent;
     }
 }
 
@@ -548,6 +666,13 @@ MerkleTree::Snapshot::Snapshot(
     : version_(version), root_(root), leaf_map_(leaf_map) {
 }
 
+MerkleTree::Snapshot::~Snapshot() {
+    if (root_) {
+        // 递归减少所有引用节点的引用计数
+        decrement_ref_counts(root_);
+    }
+}
+
 bool MerkleTree::Snapshot::contains(const std::string& data) const {
     const std::string target_hash = MerkleTree::hash_data(data);
     return leaf_map_.find(target_hash) != leaf_map_.end();
@@ -592,36 +717,104 @@ MerkleTree::Proof MerkleTree::Snapshot::generate_proof(const std::string& data) 
     return proof;
 }
 
-std::shared_ptr<MerkleNode> MerkleTree::deep_copy_node(
-    const std::shared_ptr<MerkleNode>& node,
-    std::unordered_map<std::shared_ptr<MerkleNode>, std::shared_ptr<MerkleNode>>& node_map) {
+void MerkleTree::Snapshot::increment_ref_counts(const std::shared_ptr<MerkleNode>& node) {
+    if (!node) return;
     
-    if (!node) return nullptr;
-    
-    // 检查是否已经复制过这个节点
-    auto it = node_map.find(node);
-    if (it != node_map.end()) {
-        return it->second;
+    // 如果节点已在集合中，不再处理
+    if (referenced_nodes_.find(node) != referenced_nodes_.end()) {
+        return;
     }
     
-    // 创建新节点
+    // 增加引用计数并记录节点
+    node->ref_count++;
+    referenced_nodes_.insert(node);
+    
+    // 递归处理子节点
+    if (node->left) increment_ref_counts(node->left);
+    if (node->right) increment_ref_counts(node->right);
+}
+
+void MerkleTree::Snapshot::decrement_ref_counts(const std::shared_ptr<MerkleNode>& node) {
+    if (!node) return;
+    
+    // 如果节点不在集合中，不处理
+    if (referenced_nodes_.find(node) == referenced_nodes_.end()) {
+        return;
+    }
+    
+    // 减少引用计数并从集合移除
+    node->ref_count--;
+    referenced_nodes_.erase(node);
+    
+    // 递归处理子节点
+    if (node->left) decrement_ref_counts(node->left);
+    if (node->right) decrement_ref_counts(node->right);
+}
+
+// 检查节点是否共享
+bool MerkleTree::is_node_shared(const std::shared_ptr<MerkleNode>& node) const {
+    return node && node->ref_count > 1;
+}
+
+// 获取可写节点
+std::shared_ptr<MerkleNode> MerkleTree::get_writable_node(
+    const std::shared_ptr<MerkleNode>& node) {
+    
+    if (!node || node->ref_count == 1) {
+        // 如果节点为空或引用计数为1，无需复制
+        return node;
+    }
+    
+    // 创建节点副本
     auto copy = std::make_shared<MerkleNode>(node->hash);
-    node_map[node] = copy;
+    node_counter_++;
     
-    // 递归复制子节点
-    if (node->left) {
-        copy->left = deep_copy_node(node->left, node_map);
-        copy->left->parent = copy;
-    }
+    // 复制子节点引用（但不复制子节点本身）
+    copy->left = node->left;
+    copy->right = node->right;
     
-    if (node->right) {
-        copy->right = deep_copy_node(node->right, node_map);
-        copy->right->parent = copy;
-    }
+    // 更新子节点的parent指针
+    if (copy->left) copy->left->parent = copy;
+    if (copy->right) copy->right->parent = copy;
     
     return copy;
 }
 
+// 从节点到根的路径克隆
+std::shared_ptr<MerkleNode> MerkleTree::clone_path_to_root(
+    const std::shared_ptr<MerkleNode>& from_node) {
+    
+    if (!from_node) return nullptr;
+    
+    // 如果节点不共享，无需克隆
+    if (!is_node_shared(from_node)) {
+        return from_node;
+    }
+    
+    // 创建节点副本
+    auto node_copy = get_writable_node(from_node);
+    
+    // 处理父节点路径
+    auto parent = from_node->parent.lock();
+    if (parent) {
+        // 递归克隆父节点路径
+        auto parent_copy = clone_path_to_root(parent);
+        
+        // 更新父节点的子节点引用
+        if (parent->left == from_node) {
+            parent_copy->left = node_copy;
+        } else {
+            parent_copy->right = node_copy;
+        }
+        
+        // 更新子节点的父节点引用
+        node_copy->parent = parent_copy;
+    }
+    
+    return node_copy;
+}
+
+// 创建快照
 std::shared_ptr<MerkleTree::Snapshot> MerkleTree::create_snapshot() {
     // 确保所有异步操作完成
     flush();
@@ -629,62 +822,51 @@ std::shared_ptr<MerkleTree::Snapshot> MerkleTree::create_snapshot() {
     // 锁定树结构
     std::shared_lock lock(structure_mutex_);
     
-    // 为快照创建一个新的叶子映射
-    tbb::concurrent_unordered_map<std::string, std::shared_ptr<MerkleNode>> snapshot_leaf_map;
+    // 创建快照对象，直接使用当前树的引用
+    auto snapshot = std::make_shared<Snapshot>(
+        version_, root_, leaf_map_);
     
-    // 深拷贝根节点和整个树结构
-    std::unordered_map<std::shared_ptr<MerkleNode>, std::shared_ptr<MerkleNode>> node_map;
-    std::shared_ptr<MerkleNode> snapshot_root = nullptr;
-    
+    // 注册快照并增加节点引用计数
     if (root_) {
-        snapshot_root = deep_copy_node(root_, node_map);
+        snapshot->increment_ref_counts(root_);
     }
     
-    // 构建叶子节点映射
-    for (const auto& [hash, leaf] : leaf_map_) {
-        auto it = node_map.find(leaf);
-        if (it != node_map.end()) {
-            snapshot_leaf_map.emplace(hash, it->second);
-        }
+    // 注册到活跃快照列表
+    {
+        std::lock_guard<std::mutex> snap_lock(snapshots_mutex_);
+        active_snapshots_.push_back(snapshot);
     }
     
-    // 创建并返回快照
-    return std::make_shared<Snapshot>(version_, snapshot_root, snapshot_leaf_map);
+    return snapshot;
 }
 
+// 重置树为快照状态
 void MerkleTree::reset_to_snapshot(const std::shared_ptr<Snapshot>& snapshot) {
     if (!snapshot) return;
     
-    // 确保所有异步操作完成
     flush();
-    
-    // 锁定树结构
     std::unique_lock lock(structure_mutex_);
     
-    // 深拷贝快照树
-    std::unordered_map<std::shared_ptr<MerkleNode>, std::shared_ptr<MerkleNode>> node_map;
-    std::shared_ptr<MerkleNode> new_root = nullptr;
+    // 减少当前树根的引用计数(如果被快照引用)
+    if (root_ && root_->ref_count > 1) {
+        root_->ref_count--;
+    }
     
+    // 增加快照根的引用计数
     if (snapshot->root_) {
-        new_root = deep_copy_node(snapshot->root_, node_map);
+        snapshot->root_->ref_count++;
     }
     
-    // 更新叶子映射
-    tbb::concurrent_unordered_map<std::string, std::shared_ptr<MerkleNode>> new_leaf_map;
-    for (const auto& [hash, leaf] : snapshot->leaf_map_) {
-        auto it = node_map.find(leaf);
-        if (it != node_map.end()) {
-            new_leaf_map.emplace(hash, it->second);
-        }
-    }
-    
-    // 更新树状态
-    root_ = new_root;
-    leaf_map_ = std::move(new_leaf_map);
+    // 直接使用快照的状态
+    root_ = snapshot->root_;
+    leaf_map_ = snapshot->leaf_map_;
     version_ = snapshot->version_;
-    node_counter_ = node_map.size();
+    
+    // 更新节点计数
+    node_counter_ = leaf_map_.size();
 }
 
+// 清理
 void MerkleTree::clear() {
     // 确保所有异步操作完成
     flush();
@@ -692,9 +874,48 @@ void MerkleTree::clear() {
     // 锁定树结构
     std::unique_lock lock(structure_mutex_);
     
+    // 检查是否有快照引用
+    std::lock_guard<std::mutex> snap_lock(snapshots_mutex_);
+    bool has_snapshots = !active_snapshots_.empty();
+    
+    if (has_snapshots && root_) {
+        // 如果有快照并且树不为空，递减引用计数
+        if (root_->ref_count > 1) {
+            root_->ref_count--;
+        }
+    }
+    
     // 清空树
     root_ = nullptr;
     leaf_map_.clear();
     node_counter_ = 0;
     version_++;
+}
+
+std::shared_ptr<MerkleNode> MerkleTree::deep_copy_node(
+    const std::shared_ptr<MerkleNode>& node,
+    std::unordered_map<std::shared_ptr<MerkleNode>, std::shared_ptr<MerkleNode>>& node_map) {
+    
+    if (!node) return nullptr;
+    
+    // 检查是否已复制
+    auto it = node_map.find(node);
+    if (it != node_map.end()) {
+        return it->second;
+    }
+    
+    // 创建节点副本
+    auto node_copy = std::make_shared<MerkleNode>(node->hash);
+    node_counter_++;
+    node_map[node] = node_copy;
+    
+    // 递归复制子节点
+    node_copy->left = deep_copy_node(node->left, node_map);
+    node_copy->right = deep_copy_node(node->right, node_map);
+    
+    // 更新子节点的父指针
+    if (node_copy->left) node_copy->left->parent = node_copy;
+    if (node_copy->right) node_copy->right->parent = node_copy;
+    
+    return node_copy;
 }
