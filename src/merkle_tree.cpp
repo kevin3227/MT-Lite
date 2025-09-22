@@ -891,31 +891,3 @@ void MerkleTree::clear() {
     node_counter_ = 0;
     version_++;
 }
-
-std::shared_ptr<MerkleNode> MerkleTree::deep_copy_node(
-    const std::shared_ptr<MerkleNode>& node,
-    std::unordered_map<std::shared_ptr<MerkleNode>, std::shared_ptr<MerkleNode>>& node_map) {
-    
-    if (!node) return nullptr;
-    
-    // 检查是否已复制
-    auto it = node_map.find(node);
-    if (it != node_map.end()) {
-        return it->second;
-    }
-    
-    // 创建节点副本
-    auto node_copy = std::make_shared<MerkleNode>(node->hash);
-    node_counter_++;
-    node_map[node] = node_copy;
-    
-    // 递归复制子节点
-    node_copy->left = deep_copy_node(node->left, node_map);
-    node_copy->right = deep_copy_node(node->right, node_map);
-    
-    // 更新子节点的父指针
-    if (node_copy->left) node_copy->left->parent = node_copy;
-    if (node_copy->right) node_copy->right->parent = node_copy;
-    
-    return node_copy;
-}
